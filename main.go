@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 )
 
 func getPing(w http.ResponseWriter, r *http.Request) {
@@ -21,6 +22,18 @@ func main() {
 	if httpPort == "" {
 		httpPort = "8080"
 	}
+
+	go func() {
+		for {
+			dat, err := os.ReadFile("/etc/netprober/endpointsJSON")
+			if err != nil {
+				log.Println("error reading file", err)
+			} else {
+				log.Println(string(dat))
+			}
+			time.Sleep(time.Second * 10)
+		}
+	}()
 
 	listenAddr := net.JoinHostPort("", httpPort)
 

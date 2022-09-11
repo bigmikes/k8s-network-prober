@@ -3,5 +3,5 @@ docker:
 run: 
 	docker run --publish 8080:8080 kube-net-prober
 publish: 
-	docker image tag kube-net-prober:latest bigmikes/kube-net-prober:test-version-v2
-	docker push bigmikes/kube-net-prober:test-version-v2
+	docker image tag kube-net-prober:latest bigmikes/kube-net-prober:test-version-v4
+	docker push bigmikes/kube-net-prober:test-version-v4

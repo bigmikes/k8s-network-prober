@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -15,16 +17,26 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-type PingPongServer struct {
+type Config struct {
+	EndpointsList []Endpoint    `json:"endpointsList"`
+	PollingPeriod time.Duration `json:"pollingPeriod"`
+}
+
+type Endpoint struct {
+	IP   string `json:"ip"`
+	Port string `json:"port"`
+}
+
+type PongServer struct {
 	mux    *http.ServeMux
 	server *http.Server
 }
 
-func NewPingPongServer() *PingPongServer {
+func NewPongServer() *PongServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", handleGetPing)
 
-	port := getPingPongServerPort()
+	port := getPongServerPort()
 	listenAddr := net.JoinHostPort("", port)
 
 	server := &http.Server{
@@ -34,13 +46,13 @@ func NewPingPongServer() *PingPongServer {
 		Handler:      mux,
 	}
 
-	return &PingPongServer{
+	return &PongServer{
 		mux:    mux,
 		server: server,
 	}
 }
 
-func (p *PingPongServer) ListenAndServe() {
+func (p *PongServer) ListenAndServe() {
 	err := p.server.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		log.Println("server closed")
@@ -50,7 +62,7 @@ func (p *PingPongServer) ListenAndServe() {
 	}
 }
 
-func (p *PingPongServer) Shutdown(ctx context.Context) {
+func (p *PongServer) Shutdown(ctx context.Context) {
 	log.Println(p.server.Shutdown(ctx))
 }
 
@@ -59,12 +71,57 @@ func handleGetPing(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "pong\n")
 }
 
-func getPingPongServerPort() string {
+func getPongServerPort() string {
 	httpPort := os.Getenv("HTTP_PORT")
 	if httpPort == "" {
 		httpPort = "8080"
 	}
 	return httpPort
+}
+
+type PingClient struct {
+}
+
+func NewPingClient() *PingClient {
+	return &PingClient{}
+}
+
+func (p *PingClient) ProbingLoop() {
+	pollingPeriod := time.Second * 10
+	for {
+		time.Sleep(pollingPeriod)
+		pathConfigFile := getPathToConfigFile()
+		configJSON, err := os.ReadFile(pathConfigFile)
+		if err != nil {
+			log.Println("error reading file", err)
+			continue
+		}
+		config := Config{}
+		err = json.Unmarshal(configJSON, &config)
+		if err != nil {
+			log.Println("error unmarshalling file", err)
+			continue
+		}
+		pollingPeriod = config.PollingPeriod
+
+		for _, endpoint := range config.EndpointsList {
+			now := time.Now()
+			resp, err := http.Get(fmt.Sprintf("http://%s:%s/ping", endpoint.IP, endpoint.Port))
+			rtt := time.Since(now)
+			if resp.StatusCode != http.StatusOK {
+				log.Println("error in get request", err)
+			}
+			log.Println("rtt", rtt)
+		}
+	}
+}
+
+func getPathToConfigFile() string {
+	configPath := os.Getenv("NET_PROBER_CONFIG_FILE")
+	if configPath == "" {
+		configPath = "/etc/netprober/config.json"
+	}
+	return configPath
 }
 
 type PrometheusServer struct {
@@ -118,27 +175,18 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
-	go func() {
-		for {
-			dat, err := os.ReadFile("/etc/netprober/endpointsJSON")
-			if err != nil {
-				log.Println("error reading file", err)
-			} else {
-				log.Println(string(dat))
-			}
-			time.Sleep(time.Second * 10)
-		}
-	}()
-
-	pingPongServer := NewPingPongServer()
+	pongServer := NewPongServer()
 	prometheusServer := NewPrometheusServer()
+	pingClient := NewPingClient()
 
-	go pingPongServer.ListenAndServe()
+	go pongServer.ListenAndServe()
 	go prometheusServer.ListenAndServe()
+	go pingClient.ProbingLoop()
 
 	<-c
 
-	ctx, _ := context.WithTimeout(context.Background(), time.Second*10)
-	pingPongServer.Shutdown(ctx)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	pongServer.Shutdown(ctx)
 	prometheusServer.Shutdown(ctx)
+	cancel()
 }

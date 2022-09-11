@@ -1,27 +1,122 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func getPing(w http.ResponseWriter, r *http.Request) {
+type PingPongServer struct {
+	mux    *http.ServeMux
+	server *http.Server
+}
+
+func NewPingPongServer() *PingPongServer {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ping", handleGetPing)
+
+	port := getPingPongServerPort()
+	listenAddr := net.JoinHostPort("", port)
+
+	server := &http.Server{
+		Addr:         listenAddr,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		Handler:      mux,
+	}
+
+	return &PingPongServer{
+		mux:    mux,
+		server: server,
+	}
+}
+
+func (p *PingPongServer) ListenAndServe() {
+	err := p.server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		log.Println("server closed")
+
+	} else if err != nil {
+		log.Fatalf("error starting server: %s\n", err)
+	}
+}
+
+func (p *PingPongServer) Shutdown(ctx context.Context) {
+	log.Println(p.server.Shutdown(ctx))
+}
+
+func handleGetPing(w http.ResponseWriter, r *http.Request) {
 	log.Println("ping request")
 	io.WriteString(w, "pong\n")
 }
 
-func main() {
-	http.HandleFunc("/ping", getPing)
-
+func getPingPongServerPort() string {
 	httpPort := os.Getenv("HTTP_PORT")
 	if httpPort == "" {
 		httpPort = "8080"
 	}
+	return httpPort
+}
+
+type PrometheusServer struct {
+	mux    *http.ServeMux
+	server *http.Server
+}
+
+func NewPrometheusServer() *PrometheusServer {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+
+	port := getPrometheusServerPort()
+	listenAddr := net.JoinHostPort("", port)
+
+	server := &http.Server{
+		Addr:         listenAddr,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		Handler:      mux,
+	}
+
+	return &PrometheusServer{
+		mux:    mux,
+		server: server,
+	}
+}
+
+func (p *PrometheusServer) ListenAndServe() {
+	err := p.server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		log.Println("server closed")
+
+	} else if err != nil {
+		log.Fatalf("error starting server: %s\n", err)
+	}
+}
+
+func (p *PrometheusServer) Shutdown(ctx context.Context) {
+	log.Println(p.server.Shutdown(ctx))
+}
+
+func getPrometheusServerPort() string {
+	httpPort := os.Getenv("HTTP_PROMETHEUS_PORT")
+	if httpPort == "" {
+		httpPort = "2112"
+	}
+	return httpPort
+}
+
+func main() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		for {
@@ -35,14 +130,15 @@ func main() {
 		}
 	}()
 
-	listenAddr := net.JoinHostPort("", httpPort)
+	pingPongServer := NewPingPongServer()
+	prometheusServer := NewPrometheusServer()
 
-	log.Println("Starting HTTP server on", listenAddr)
-	err := http.ListenAndServe(listenAddr, nil)
-	if errors.Is(err, http.ErrServerClosed) {
-		log.Println("server closed")
+	go pingPongServer.ListenAndServe()
+	go prometheusServer.ListenAndServe()
 
-	} else if err != nil {
-		log.Fatalf("error starting server: %s\n", err)
-	}
+	<-c
+
+	ctx, _ := context.WithTimeout(context.Background(), time.Second*10)
+	pingPongServer.Shutdown(ctx)
+	prometheusServer.Shutdown(ctx)
 }

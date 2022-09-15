@@ -18,8 +18,8 @@ import (
 )
 
 type Config struct {
-	EndpointsList []Endpoint    `json:"endpointsList"`
-	PollingPeriod time.Duration `json:"pollingPeriod"`
+	EndpointsMap  map[string]Endpoint `json:"endpointsMap"`
+	PollingPeriod time.Duration       `json:"pollingPeriod"`
 }
 
 type Endpoint struct {
@@ -80,14 +80,18 @@ func getPongServerPort() string {
 }
 
 type PingClient struct {
+	addrSet map[string]bool
 }
 
-func NewPingClient() *PingClient {
-	return &PingClient{}
+func NewPingClient(addrSet map[string]bool) *PingClient {
+	return &PingClient{
+		addrSet: addrSet,
+	}
 }
 
 func (p *PingClient) ProbingLoop() {
 	pollingPeriod := time.Second * 10
+
 	for {
 		time.Sleep(pollingPeriod)
 		pathConfigFile := getPathToConfigFile()
@@ -104,16 +108,40 @@ func (p *PingClient) ProbingLoop() {
 		}
 		pollingPeriod = config.PollingPeriod
 
-		for _, endpoint := range config.EndpointsList {
+		for epName, endpoint := range config.EndpointsMap {
+			if p.addrSet[endpoint.IP] {
+				// Skip my endpoint
+				continue
+			}
 			now := time.Now()
 			resp, err := http.Get(fmt.Sprintf("http://%s:%s/ping", endpoint.IP, endpoint.Port))
+			if err != nil {
+				log.Println("error in get request", err)
+				continue
+			}
 			rtt := time.Since(now)
 			if resp.StatusCode != http.StatusOK {
 				log.Println("error in get request", err)
 			}
-			log.Println("rtt", rtt)
+			log.Printf("rtt to pod %s is %v", epName, rtt)
 		}
 	}
+}
+
+func getLocalIPv4Addresses() (map[string]bool, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	addrSet := map[string]bool{}
+	for _, address := range addrs {
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				addrSet[ipnet.IP.String()] = true
+			}
+		}
+	}
+	return addrSet, nil
 }
 
 func getPathToConfigFile() string {
@@ -175,9 +203,14 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
+	addrSet, err := getLocalIPv4Addresses()
+	if err != nil {
+		log.Fatalf("failed to fetch interfaces addresses %v", err)
+	}
+
 	pongServer := NewPongServer()
 	prometheusServer := NewPrometheusServer()
-	pingClient := NewPingClient()
+	pingClient := NewPingClient(addrSet)
 
 	go pongServer.ListenAndServe()
 	go prometheusServer.ListenAndServe()

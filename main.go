@@ -14,7 +14,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	labels          = []string{"dest_pod_name", "dest_ip"}
+	interPodLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "netprober_interpod_latency_s",
+		Help:    "Histogram of inter-Pod HTTP probe latencies",
+		Buckets: prometheus.ExponentialBuckets(0.00001, 2, 25),
+	}, labels)
 )
 
 type Config struct {
@@ -124,6 +135,7 @@ func (p *PingClient) ProbingLoop() {
 				log.Println("error in get request", err)
 			}
 			log.Printf("rtt to pod %s is %v", epName, rtt)
+			interPodLatency.WithLabelValues(epName, endpoint.IP).Observe(rtt.Seconds())
 		}
 	}
 }
